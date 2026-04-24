@@ -1,16 +1,22 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
+
+	"github.com/abolcerek/HTTPserver/internal/database"
+	_ "github.com/lib/pq"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	database *database.Queries
 }
 
 type parameters struct {
@@ -105,12 +111,19 @@ func handleErrors(w http.ResponseWriter, err_params *error_parameters) {
 }
 
 func main() {
+	dbURL := os.Getenv("DB_URL")
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		fmt.Print(err)
+		os.Exit(1)
+	}
 	mux := http.NewServeMux()
 	server := &http.Server{
 		Addr: ":8080",
 		Handler: mux,
 	}
 	apiCfg := apiConfig {}
+	apiCfg.database = database.New(db)
 	fs := http.FileServer(http.Dir("."))
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/", fs)))
 	mux.HandleFunc("GET /admin/metrics", apiCfg.HitsHandler)
