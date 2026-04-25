@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -9,16 +10,25 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/abolcerek/HTTPserver/internal/database"
+	"github.com/google/uuid"
+	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	database *database.Queries
+	platform string
 }
-
+type User struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
+}
 type parameters struct {
 	Body string `json:"body"`
 }
@@ -52,11 +62,66 @@ func HealthzHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) HandlerReset(w http.ResponseWriter, r *http.Request){
+	if cfg.platform != "dev" {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(403)
+		http_response := "403 Forbidden"
+		w.Write([]byte(http_response))
+		return
+	}
 	cfg.fileserverHits.Store(0)
+	ctx := context.Background()
+	err := cfg.database.ResetUsers(ctx)
+	if err != nil {
+		err_params := error_parameters{}
+		err_params.Error = "Something went wrong"
+		handleErrors(w, &err_params)
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	http_response := "200 OK"
 	w.Write([]byte(http_response))
+}
+func (cfg *apiConfig) CreateUser(w http.ResponseWriter, r *http.Request){
+	type request_params struct {
+		Email string `json:"email"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	req_params := request_params{}
+	err_params := error_parameters{}
+	err := decoder.Decode(&req_params)
+	user_params := database.CreateUserParams{
+		ID: uuid.New(),
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		Email: req_params.Email,
+	}
+	if err != nil {
+		err_params.Error = "Something went wrong"
+		handleErrors(w, &err_params)
+		return
+	}
+	database_user, err := cfg.database.CreateUser(r.Context(), user_params)
+	if err != nil {
+		err_params.Error = "Something went wrong"
+		handleErrors(w, &err_params)
+		return
+	}
+	user := User{
+		ID: database_user.ID,
+		CreatedAt: database_user.CreatedAt,
+		UpdatedAt: database_user.UpdatedAt,
+		Email: database_user.Email,
+	}
+	data, err := json.Marshal(user)
+	if err != nil {
+		err_params.Error = "Something went wrong"
+		handleErrors(w, &err_params)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(201)
+	w.Write(data)
 }
 
 func HandlerChirp(w http.ResponseWriter, r *http.Request) {
@@ -111,7 +176,9 @@ func handleErrors(w http.ResponseWriter, err_params *error_parameters) {
 }
 
 func main() {
+	godotenv.Load()
 	dbURL := os.Getenv("DB_URL")
+	platform := os.Getenv("PLATFORM")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		fmt.Print(err)
@@ -124,9 +191,11 @@ func main() {
 	}
 	apiCfg := apiConfig {}
 	apiCfg.database = database.New(db)
+	apiCfg.platform = platform
 	fs := http.FileServer(http.Dir("."))
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/", fs)))
 	mux.HandleFunc("GET /admin/metrics", apiCfg.HitsHandler)
+	mux.HandleFunc("POST /api/users", apiCfg.CreateUser)
 	mux.HandleFunc("GET /api/healthz", HealthzHandler)
 	mux.HandleFunc("POST /api/validate_chirp", HandlerChirp)
 	mux.HandleFunc("POST /admin/reset", apiCfg.HandlerReset)
