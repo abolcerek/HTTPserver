@@ -40,6 +40,14 @@ type response_parameters struct {
 	Cleaned_Body string `json:"cleaned_body"`
 }
 
+type Chirp struct {
+		ID        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Body     string    `json:"body"`
+		UserID     uuid.UUID    `json:"user_id"`
+	}
+
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg.fileserverHits.Add(1) 
@@ -156,14 +164,7 @@ func (cfg *apiConfig) HandlerChirp(w http.ResponseWriter, r *http.Request) {
 		handleErrors(w, &err_params)
 		return
 	}
-	type Chirp_response struct {
-		ID        uuid.UUID `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Body     string    `json:"body"`
-		UserID     uuid.UUID    `json:"user_id"`
-	}
-	chirp_response := Chirp_response{
+	chirp_response := Chirp{
 		ID: chirp.ID,
 		CreatedAt: chirp.CreatedAt,
 		UpdatedAt: chirp.UpdatedAt,
@@ -177,6 +178,76 @@ func (cfg *apiConfig) HandlerChirp(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(201)
+	w.Write(data)
+}
+
+func (cfg *apiConfig) HandlerGetChirps(w http.ResponseWriter, r *http.Request) {
+	ctx := context.Background()
+	chirps, err := cfg.database.GetChirps(ctx)
+	err_params := error_parameters{}
+	if err != nil {
+		err_params.Error = "Something went wrong"
+		handleErrors(w, &err_params)
+		return
+	}
+	chirps_response := []Chirp{}
+	for i := range chirps {
+		chirp_response := Chirp{
+			ID: chirps[i].ID,
+			CreatedAt: chirps[i].CreatedAt,
+			UpdatedAt: chirps[i].UpdatedAt,
+			Body: chirps[i].Body,
+			UserID: chirps[i].UserID,
+		}
+		chirps_response = append(chirps_response, chirp_response)
+	}
+	data, err := json.Marshal(chirps_response)
+	if err != nil {
+		log.Printf("Error marshalling JSON")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(200)
+	w.Write(data)
+}
+
+func (cfg *apiConfig) HandlerGetChirp(w http.ResponseWriter, r *http.Request) {
+	err_params := error_parameters{}
+	chirp_id, err := uuid.Parse(r.PathValue("chirpID"))
+	if err != nil {
+		err_params.Error = "Something went wrong"
+		handleErrors(w, &err_params)
+		return
+	}
+	ctx := context.Background()
+	chirp, err := cfg.database.GetChirp(ctx, chirp_id)
+	if err != nil {
+		err_params.Error = "No Chirp Found"
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(404)
+		data, err := json.Marshal(err_params)
+		if err != nil {
+			log.Printf("Error marshalling JSON")
+			return
+		}
+		w.Write(data) 
+		return
+	}
+	chirp_response := Chirp{
+			ID: chirp.ID,
+			CreatedAt: chirp.CreatedAt,
+			UpdatedAt: chirp.UpdatedAt,
+			Body: chirp.Body,
+			UserID: chirp.UserID,
+	}
+	data, err := json.Marshal(chirp_response)
+	if err != nil {
+		log.Printf("Error marshalling JSON")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(200)
 	w.Write(data)
 }
 
@@ -226,6 +297,8 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", apiCfg.HitsHandler)
 	mux.HandleFunc("POST /api/users", apiCfg.CreateUser)
 	mux.HandleFunc("GET /api/healthz", HealthzHandler)
+	mux.HandleFunc("GET /api/chirps", apiCfg.HandlerGetChirps)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.HandlerGetChirp)
 	mux.HandleFunc("POST /api/chirps", apiCfg.HandlerChirp)
 	mux.HandleFunc("POST /admin/reset", apiCfg.HandlerReset)
 	server.ListenAndServe()
