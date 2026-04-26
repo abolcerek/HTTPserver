@@ -31,6 +31,7 @@ type User struct {
 }
 type parameters struct {
 	Body string `json:"body"`
+	ID uuid.UUID `json:"user_id"`
 }
 type error_parameters struct {
 	Error string `json:"error"`
@@ -124,7 +125,7 @@ func (cfg *apiConfig) CreateUser(w http.ResponseWriter, r *http.Request){
 	w.Write(data)
 }
 
-func HandlerChirp(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) HandlerChirp(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
 	err_params := error_parameters{}
@@ -141,13 +142,41 @@ func HandlerChirp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp_params = handleProfanity(params.Body)
-	data, err := json.Marshal(resp_params)
+	ctx := context.Background()
+	chirp_params := database.CreateChirpParams{
+		ID: uuid.New(),
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		Body: resp_params.Cleaned_Body,
+		UserID: params.ID,
+	}
+	chirp, err := cfg.database.CreateChirp(ctx, chirp_params)
+	if err != nil {
+		err_params.Error = "Something went wrong"
+		handleErrors(w, &err_params)
+		return
+	}
+	type Chirp_response struct {
+		ID        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Body     string    `json:"body"`
+		UserID     uuid.UUID    `json:"user_id"`
+	}
+	chirp_response := Chirp_response{
+		ID: chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body: chirp.Body,
+		UserID: chirp.UserID,
+	}
+	data, err := json.Marshal(chirp_response)
 	if err != nil {
 		log.Printf("Error marshalling JSON")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(200)
+	w.WriteHeader(201)
 	w.Write(data)
 }
 
@@ -197,7 +226,7 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", apiCfg.HitsHandler)
 	mux.HandleFunc("POST /api/users", apiCfg.CreateUser)
 	mux.HandleFunc("GET /api/healthz", HealthzHandler)
-	mux.HandleFunc("POST /api/validate_chirp", HandlerChirp)
+	mux.HandleFunc("POST /api/chirps", apiCfg.HandlerChirp)
 	mux.HandleFunc("POST /admin/reset", apiCfg.HandlerReset)
 	server.ListenAndServe()
 }
