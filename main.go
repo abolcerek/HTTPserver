@@ -11,7 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-
+	"github.com/abolcerek/HTTPserver/internal/auth"
 	"github.com/abolcerek/HTTPserver/internal/database"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -23,11 +23,17 @@ type apiConfig struct {
 	database *database.Queries
 	platform string
 }
+
 type User struct {
-	ID        uuid.UUID `json:"id"`
+	Password string `json:"password"`
+	Email string `json:"email"`
+}
+
+type User_Resource struct {
+	ID uuid.UUID `json:"id"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
+	Email string `json:"email"`
 }
 type parameters struct {
 	Body string `json:"body"`
@@ -46,7 +52,7 @@ type Chirp struct {
 		UpdatedAt time.Time `json:"updated_at"`
 		Body     string    `json:"body"`
 		UserID     uuid.UUID    `json:"user_id"`
-	}
+}
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -84,7 +90,7 @@ func (cfg *apiConfig) HandlerReset(w http.ResponseWriter, r *http.Request){
 	if err != nil {
 		err_params := error_parameters{}
 		err_params.Error = "Something went wrong"
-		handleErrors(w, &err_params)
+		handleErrors(w, &err_params, 400)
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
@@ -92,31 +98,35 @@ func (cfg *apiConfig) HandlerReset(w http.ResponseWriter, r *http.Request){
 	w.Write([]byte(http_response))
 }
 func (cfg *apiConfig) CreateUser(w http.ResponseWriter, r *http.Request){
-	type request_params struct {
-		Email string `json:"email"`
-	}
 	decoder := json.NewDecoder(r.Body)
-	req_params := request_params{}
+	req_params := User{}
 	err_params := error_parameters{}
 	err := decoder.Decode(&req_params)
+	if err != nil {
+		err_params.Error = "Something went wrong"
+		handleErrors(w, &err_params, 400)
+		return
+	}
+	hashed_password, err := auth.HashPassword(req_params.Password)
+	if err != nil {
+		err_params.Error = "Something went wrong"
+		handleErrors(w, &err_params, 400)
+		return
+	}
 	user_params := database.CreateUserParams{
 		ID: uuid.New(),
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 		Email: req_params.Email,
-	}
-	if err != nil {
-		err_params.Error = "Something went wrong"
-		handleErrors(w, &err_params)
-		return
+		HashedPassword: hashed_password,
 	}
 	database_user, err := cfg.database.CreateUser(r.Context(), user_params)
 	if err != nil {
 		err_params.Error = "Something went wrong"
-		handleErrors(w, &err_params)
+		handleErrors(w, &err_params, 400)
 		return
 	}
-	user := User{
+	user := User_Resource{
 		ID: database_user.ID,
 		CreatedAt: database_user.CreatedAt,
 		UpdatedAt: database_user.UpdatedAt,
@@ -125,13 +135,57 @@ func (cfg *apiConfig) CreateUser(w http.ResponseWriter, r *http.Request){
 	data, err := json.Marshal(user)
 	if err != nil {
 		err_params.Error = "Something went wrong"
-		handleErrors(w, &err_params)
+		handleErrors(w, &err_params, 400)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(201)
 	w.Write(data)
 }
+
+func (cfg *apiConfig) HandlerLogin(w http.ResponseWriter, r *http.Request) {
+	decoder := json.NewDecoder(r.Body)
+	params := User{}
+	err_params := error_parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		err_params.Error = "Something went wrong"
+		handleErrors(w, &err_params, 400)
+		return
+	}
+	ctx := context.Background()
+	user, err := cfg.database.GetUser(ctx, params.Email)
+	if err != nil {
+		err_params.Error = "Incorrect email or password"
+		handleErrors(w, &err_params, 401)
+		return
+	}
+	valid, err := auth.CheckPasswordHash(params.Password, user.HashedPassword)
+	if err != nil {
+		err_params.Error = "Error Checking Password"
+		handleErrors(w, &err_params, 400)
+		return
+	}
+	if !valid {
+		err_params.Error = "Incorrect email or password"
+		handleErrors(w, &err_params, 401)
+		return
+	}
+	user_resource := User_Resource{
+		ID: user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email: user.Email,
+	}
+	data, err := json.Marshal(user_resource)
+	if err != nil {
+		log.Printf("Error marshalling JSON")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(200)
+	w.Write(data)
+	}
 
 func (cfg *apiConfig) HandlerChirp(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
@@ -141,12 +195,12 @@ func (cfg *apiConfig) HandlerChirp(w http.ResponseWriter, r *http.Request) {
 	err := decoder.Decode(&params)
 	if err != nil {
 		err_params.Error = "Something went wrong"
-		handleErrors(w, &err_params)
+		handleErrors(w, &err_params, 400)
 		return
 	}
 	if len(params.Body) >= 140 {
 		err_params.Error = "Chirp is too long"
-		handleErrors(w, &err_params)
+		handleErrors(w, &err_params, 400)
 		return
 	}
 	resp_params = handleProfanity(params.Body)
@@ -161,7 +215,7 @@ func (cfg *apiConfig) HandlerChirp(w http.ResponseWriter, r *http.Request) {
 	chirp, err := cfg.database.CreateChirp(ctx, chirp_params)
 	if err != nil {
 		err_params.Error = "Something went wrong"
-		handleErrors(w, &err_params)
+		handleErrors(w, &err_params, 400)
 		return
 	}
 	chirp_response := Chirp{
@@ -187,7 +241,7 @@ func (cfg *apiConfig) HandlerGetChirps(w http.ResponseWriter, r *http.Request) {
 	err_params := error_parameters{}
 	if err != nil {
 		err_params.Error = "Something went wrong"
-		handleErrors(w, &err_params)
+		handleErrors(w, &err_params, 400)
 		return
 	}
 	chirps_response := []Chirp{}
@@ -216,7 +270,7 @@ func (cfg *apiConfig) HandlerGetChirp(w http.ResponseWriter, r *http.Request) {
 	chirp_id, err := uuid.Parse(r.PathValue("chirpID"))
 	if err != nil {
 		err_params.Error = "Something went wrong"
-		handleErrors(w, &err_params)
+		handleErrors(w, &err_params, 400)
 		return
 	}
 	ctx := context.Background()
@@ -264,9 +318,9 @@ func handleProfanity(response string) response_parameters {
 	return resp_params
 }
 
-func handleErrors(w http.ResponseWriter, err_params *error_parameters) {
+func handleErrors(w http.ResponseWriter, err_params *error_parameters, status_code int) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(400)
+	w.WriteHeader(status_code)
 	data, err := json.Marshal(err_params)
 	if err != nil {
 		log.Printf("Error marshalling JSON")
@@ -296,6 +350,7 @@ func main() {
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/", fs)))
 	mux.HandleFunc("GET /admin/metrics", apiCfg.HitsHandler)
 	mux.HandleFunc("POST /api/users", apiCfg.CreateUser)
+	mux.HandleFunc("POST /api/login", apiCfg.HandlerLogin)
 	mux.HandleFunc("GET /api/healthz", HealthzHandler)
 	mux.HandleFunc("GET /api/chirps", apiCfg.HandlerGetChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.HandlerGetChirp)
