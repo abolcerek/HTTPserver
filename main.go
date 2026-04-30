@@ -22,11 +22,13 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	database *database.Queries
 	platform string
+	JWT_secret string
 }
 
 type User struct {
 	Password string `json:"password"`
 	Email string `json:"email"`
+	Expires_in_Seconds int `json:"expires_in_seconds"`
 }
 
 type User_Resource struct {
@@ -34,6 +36,7 @@ type User_Resource struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email string `json:"email"`
+	Token string `json:"token"`
 }
 type parameters struct {
 	Body string `json:"body"`
@@ -47,11 +50,11 @@ type response_parameters struct {
 }
 
 type Chirp struct {
-		ID        uuid.UUID `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Body     string    `json:"body"`
-		UserID     uuid.UUID    `json:"user_id"`
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body     string    `json:"body"`
+	UserID     uuid.UUID    `json:"user_id"`
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -153,6 +156,12 @@ func (cfg *apiConfig) HandlerLogin(w http.ResponseWriter, r *http.Request) {
 		handleErrors(w, &err_params, 400)
 		return
 	}
+	if params.Expires_in_Seconds == 0 {
+		params.Expires_in_Seconds = 3600
+	}
+	if params.Expires_in_Seconds > 3600 {
+		params.Expires_in_Seconds = 3600
+	}
 	ctx := context.Background()
 	user, err := cfg.database.GetUser(ctx, params.Email)
 	if err != nil {
@@ -171,11 +180,18 @@ func (cfg *apiConfig) HandlerLogin(w http.ResponseWriter, r *http.Request) {
 		handleErrors(w, &err_params, 401)
 		return
 	}
+	jwt, err := auth.MakeJWT(user.ID, cfg.JWT_secret, (time.Duration(params.Expires_in_Seconds) * time.Second))
+	if err != nil {
+		err_params.Error = "Error generating JSON Web Token"
+		handleErrors(w, &err_params, 401)
+		return
+	}
 	user_resource := User_Resource{
 		ID: user.ID,
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: user.UpdatedAt,
 		Email: user.Email,
+		Token: jwt,
 	}
 	data, err := json.Marshal(user_resource)
 	if err != nil {
@@ -192,7 +208,19 @@ func (cfg *apiConfig) HandlerChirp(w http.ResponseWriter, r *http.Request) {
 	params := parameters{}
 	err_params := error_parameters{}
 	resp_params := response_parameters{}
-	err := decoder.Decode(&params)
+	bearer_token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		err_params.Error = "Unauthorized"
+		handleErrors(w, &err_params, 401)
+		return	
+	}
+	user_id, err := auth.ValidateJWT(bearer_token, cfg.JWT_secret)
+	if err != nil {
+		err_params.Error = "Unauthorized"
+		handleErrors(w, &err_params, 401)
+		return	
+	}
+	err = decoder.Decode(&params)
 	if err != nil {
 		err_params.Error = "Something went wrong"
 		handleErrors(w, &err_params, 400)
@@ -210,7 +238,7 @@ func (cfg *apiConfig) HandlerChirp(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 		Body: resp_params.Cleaned_Body,
-		UserID: params.ID,
+		UserID: user_id,
 	}
 	chirp, err := cfg.database.CreateChirp(ctx, chirp_params)
 	if err != nil {
@@ -333,6 +361,7 @@ func main() {
 	godotenv.Load()
 	dbURL := os.Getenv("DB_URL")
 	platform := os.Getenv("PLATFORM")
+	JWT_secret_token := os.Getenv("JWT_SECRET")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		fmt.Print(err)
@@ -346,6 +375,7 @@ func main() {
 	apiCfg := apiConfig {}
 	apiCfg.database = database.New(db)
 	apiCfg.platform = platform
+	apiCfg.JWT_secret = JWT_secret_token
 	fs := http.FileServer(http.Dir("."))
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/", fs)))
 	mux.HandleFunc("GET /admin/metrics", apiCfg.HitsHandler)

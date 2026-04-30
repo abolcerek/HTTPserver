@@ -1,2 +1,4 @@
 test.http
 .env
+internal/auth/auth_test.go
+internal/auth/token_test.go
