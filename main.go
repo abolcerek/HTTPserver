@@ -30,6 +30,13 @@ type User struct {
 	Email string `json:"email"`
 }
 
+type UserInfo struct {
+	ID uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email string `json:"email"`
+}
+
 type User_Resource struct {
 	ID uuid.UUID `json:"id"`
 	CreatedAt time.Time `json:"created_at"`
@@ -129,7 +136,7 @@ func (cfg *apiConfig) CreateUser(w http.ResponseWriter, r *http.Request){
 		handleErrors(w, &err_params, 400)
 		return
 	}
-	user := User_Resource{
+	user := UserInfo{
 		ID: database_user.ID,
 		CreatedAt: database_user.CreatedAt,
 		UpdatedAt: database_user.UpdatedAt,
@@ -143,6 +150,62 @@ func (cfg *apiConfig) CreateUser(w http.ResponseWriter, r *http.Request){
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(201)
+	w.Write(data)
+}
+
+func (cfg *apiConfig) UpdateUser(w http.ResponseWriter, r *http.Request){
+	token, err := auth.GetBearerToken(r.Header)
+	err_params := error_parameters{}
+	if err != nil {
+		err_params.Error = "Invalid access token"
+		handleErrors(w, &err_params, 401)
+		return
+	}
+	id, err := auth.ValidateJWT(token, cfg.JWT_secret)
+	if err != nil {
+		err_params.Error = "Invalid access token"
+		handleErrors(w, &err_params, 401)
+		return
+	}
+	decoder := json.NewDecoder(r.Body)
+	params := User{}
+	err = decoder.Decode(&params)
+	if err != nil {
+		err_params.Error = "Something went wrong"
+		handleErrors(w, &err_params, 400)
+		return
+	}
+	hashed_password, err := auth.HashPassword(params.Password)
+	if err != nil {
+		err_params.Error = "Error Creating Password"
+		handleErrors(w, &err_params, 400)
+		return
+	}
+	ctx := context.Background()
+	update_params := database.UpdatePasswordParams{
+		Email: params.Email,
+		HashedPassword: hashed_password,
+		ID: id,
+	}
+	err = cfg.database.UpdatePassword(ctx,update_params)
+	if err != nil {
+		err_params.Error = "Something went wrong"
+		handleErrors(w, &err_params, 401)
+		return
+	}
+	database_user, err := cfg.database.GetUser(ctx, params.Email)
+	user := UserInfo{
+		ID: database_user.ID,
+		CreatedAt: database_user.CreatedAt,
+		UpdatedAt: database_user.UpdatedAt,
+		Email: database_user.Email,
+	}
+	data, err := json.Marshal(&user)
+	if err != nil {
+		fmt.Print("Error marshalling JSON")
+		return
+	}
+	w.WriteHeader(200)
 	w.Write(data)
 }
 
@@ -343,6 +406,59 @@ func (cfg *apiConfig) HandlerGetChirp(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
+func (cfg *apiConfig) HandlerDeleteChirp(w http.ResponseWriter, r *http.Request) {
+	token, err := auth.GetBearerToken(r.Header)
+	err_params := error_parameters{}
+	if err != nil {
+		err_params.Error = "Invalid access token"
+		handleErrors(w, &err_params, 401)
+		return
+	}
+	chirp_id, err := uuid.Parse(r.PathValue("chirpID"))
+	if err != nil {
+		err_params.Error = "Something went wrong"
+		handleErrors(w, &err_params, 400)
+		return
+	}
+	id, err := auth.ValidateJWT(token, cfg.JWT_secret)
+	if err != nil {
+		err_params.Error = "Invalid access token"
+		handleErrors(w, &err_params, 403)
+		return
+	}
+	ctx := context.Background()
+	chirp, err := cfg.database.GetChirp(ctx, chirp_id)
+	if err != nil {
+		err_params.Error = "No Chirp Found"
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(404)
+		data, err := json.Marshal(err_params)
+		if err != nil {
+			log.Printf("Error marshalling JSON")
+			return
+		}
+		w.Write(data) 
+		return
+	}
+	if chirp.UserID != id {
+		err_params.Error = "Invalid access token"
+		handleErrors(w, &err_params, 403)
+		return
+	}
+	ctx = context.Background()
+	delete_params := database.DeleteChirpParams {
+		ID: chirp_id,
+		UserID: id,
+	}
+	err = cfg.database.DeleteChirp(ctx, delete_params)
+	if err != nil {
+		err_params.Error = "Chirp not found"
+		handleErrors(w, &err_params, 404)
+		return
+	}
+	w.WriteHeader(204)
+}
+
 func (cfg *apiConfig) HandlerRefresh(w http.ResponseWriter, r *http.Request) {
 	bearer_token, err := auth.GetBearerToken(r.Header)
 	err_params := error_parameters{}
@@ -455,12 +571,14 @@ func main() {
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/", fs)))
 	mux.HandleFunc("GET /admin/metrics", apiCfg.HitsHandler)
 	mux.HandleFunc("POST /api/users", apiCfg.CreateUser)
+	mux.HandleFunc("PUT /api/users", apiCfg.UpdateUser)
 	mux.HandleFunc("POST /api/login", apiCfg.HandlerLogin)
 	mux.HandleFunc("POST /api/refresh", apiCfg.HandlerRefresh)
 	mux.HandleFunc("POST /api/revoke", apiCfg.HandlerRevoke)
 	mux.HandleFunc("GET /api/healthz", HealthzHandler)
 	mux.HandleFunc("GET /api/chirps", apiCfg.HandlerGetChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.HandlerGetChirp)
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.HandlerDeleteChirp)
 	mux.HandleFunc("POST /api/chirps", apiCfg.HandlerChirp)
 	mux.HandleFunc("POST /admin/reset", apiCfg.HandlerReset)
 	server.ListenAndServe()
