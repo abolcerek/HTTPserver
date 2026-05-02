@@ -28,7 +28,6 @@ type apiConfig struct {
 type User struct {
 	Password string `json:"password"`
 	Email string `json:"email"`
-	Expires_in_Seconds int `json:"expires_in_seconds"`
 }
 
 type User_Resource struct {
@@ -37,6 +36,7 @@ type User_Resource struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	Email string `json:"email"`
 	Token string `json:"token"`
+	RefreshToken string `json:"refresh_token"`
 }
 type parameters struct {
 	Body string `json:"body"`
@@ -156,12 +156,6 @@ func (cfg *apiConfig) HandlerLogin(w http.ResponseWriter, r *http.Request) {
 		handleErrors(w, &err_params, 400)
 		return
 	}
-	if params.Expires_in_Seconds == 0 {
-		params.Expires_in_Seconds = 3600
-	}
-	if params.Expires_in_Seconds > 3600 {
-		params.Expires_in_Seconds = 3600
-	}
 	ctx := context.Background()
 	user, err := cfg.database.GetUser(ctx, params.Email)
 	if err != nil {
@@ -180,9 +174,24 @@ func (cfg *apiConfig) HandlerLogin(w http.ResponseWriter, r *http.Request) {
 		handleErrors(w, &err_params, 401)
 		return
 	}
-	jwt, err := auth.MakeJWT(user.ID, cfg.JWT_secret, (time.Duration(params.Expires_in_Seconds) * time.Second))
+	jwt, err := auth.MakeJWT(user.ID, cfg.JWT_secret)
 	if err != nil {
 		err_params.Error = "Error generating JSON Web Token"
+		handleErrors(w, &err_params, 401)
+		return
+	}
+	refresh_token := auth.MakeRefreshToken()
+	ctx = context.Background()
+	refresh_params := database.CreateRefreshTokenParams{
+		Token: refresh_token,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		UserID: user.ID,
+		ExpiresAt: time.Now().AddDate(0, 0, 60),
+	}
+	err = cfg.database.CreateRefreshToken(ctx, refresh_params)
+	if err != nil {
+		err_params.Error = "Error generating JSON Refresh Token"
 		handleErrors(w, &err_params, 401)
 		return
 	}
@@ -192,6 +201,7 @@ func (cfg *apiConfig) HandlerLogin(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt: user.UpdatedAt,
 		Email: user.Email,
 		Token: jwt,
+		RefreshToken: refresh_token,
 	}
 	data, err := json.Marshal(user_resource)
 	if err != nil {
@@ -333,6 +343,71 @@ func (cfg *apiConfig) HandlerGetChirp(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
+func (cfg *apiConfig) HandlerRefresh(w http.ResponseWriter, r *http.Request) {
+	bearer_token, err := auth.GetBearerToken(r.Header)
+	err_params := error_parameters{}
+	if err != nil {
+		err_params.Error = "Something went wrong"
+		handleErrors(w, &err_params, 400)
+		return
+	}
+	ctx := context.Background()
+	user, err := cfg.database.GetRefreshToken(ctx, bearer_token)
+	if err != nil {
+		err_params.Error = "Refresh Token Not Found"
+		handleErrors(w, &err_params, 401)
+		return
+	}
+	if len(user.Token) < 1 {
+		err_params.Error = "Refresh Token Not Found"
+		handleErrors(w, &err_params, 401)
+		return
+	}
+	jwt, err := auth.MakeJWT(user.UserID, cfg.JWT_secret)
+	if err != nil {
+		err_params.Error = "Error creating JWT"
+		handleErrors(w, &err_params, 401)
+		return
+	}
+	type response struct {
+		Token string `json:"token"`
+	}
+	response_params := response{
+		Token: jwt,
+	}
+	data, err := json.Marshal(response_params)
+	if err != nil {
+		log.Printf("Error marshalling JSON")
+		return
+	}
+	w.WriteHeader(200)
+	w.Write(data)
+
+}
+
+func (cfg *apiConfig) HandlerRevoke(w http.ResponseWriter, r *http.Request) {
+	bearer_token, err := auth.GetBearerToken(r.Header)
+	err_params := error_parameters{}
+	if err != nil {
+		err_params.Error = "Something went wrong"
+		handleErrors(w, &err_params, 400)
+		return
+	}
+	ctx := context.Background()
+	refresh_params := database.SetRevokeParams{
+		RevokedAt: sql.NullTime{Time: time.Now(), Valid: true},
+		UpdatedAt: time.Now(),
+		Token: bearer_token,
+	}
+	err = cfg.database.SetRevoke(ctx, refresh_params)
+	if err != nil {
+		err_params.Error = "Refresh Token Not Found"
+		handleErrors(w, &err_params, 401)
+		return
+	}
+	w.WriteHeader(204)
+}
+
 func handleProfanity(response string) response_parameters { 
 	words := strings.Split(response, " ")
 	for i := range words {
@@ -381,6 +456,8 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", apiCfg.HitsHandler)
 	mux.HandleFunc("POST /api/users", apiCfg.CreateUser)
 	mux.HandleFunc("POST /api/login", apiCfg.HandlerLogin)
+	mux.HandleFunc("POST /api/refresh", apiCfg.HandlerRefresh)
+	mux.HandleFunc("POST /api/revoke", apiCfg.HandlerRevoke)
 	mux.HandleFunc("GET /api/healthz", HealthzHandler)
 	mux.HandleFunc("GET /api/chirps", apiCfg.HandlerGetChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.HandlerGetChirp)
