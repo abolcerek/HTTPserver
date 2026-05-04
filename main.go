@@ -23,6 +23,7 @@ type apiConfig struct {
 	database *database.Queries
 	platform string
 	JWT_secret string
+	ApiKey string
 }
 
 type User struct {
@@ -35,6 +36,7 @@ type UserInfo struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email string `json:"email"`
+	IsChirpyRed bool `json:"is_chirpy_red"`
 }
 
 type User_Resource struct {
@@ -44,6 +46,7 @@ type User_Resource struct {
 	Email string `json:"email"`
 	Token string `json:"token"`
 	RefreshToken string `json:"refresh_token"`
+	IsChirpyRed bool `json:"is_chirpy_red"`
 }
 type parameters struct {
 	Body string `json:"body"`
@@ -141,6 +144,7 @@ func (cfg *apiConfig) CreateUser(w http.ResponseWriter, r *http.Request){
 		CreatedAt: database_user.CreatedAt,
 		UpdatedAt: database_user.UpdatedAt,
 		Email: database_user.Email,
+		IsChirpyRed: database_user.IsChirpyRed,
 	}
 	data, err := json.Marshal(user)
 	if err != nil {
@@ -199,6 +203,7 @@ func (cfg *apiConfig) UpdateUser(w http.ResponseWriter, r *http.Request){
 		CreatedAt: database_user.CreatedAt,
 		UpdatedAt: database_user.UpdatedAt,
 		Email: database_user.Email,
+		IsChirpyRed: database_user.IsChirpyRed,
 	}
 	data, err := json.Marshal(&user)
 	if err != nil {
@@ -265,6 +270,7 @@ func (cfg *apiConfig) HandlerLogin(w http.ResponseWriter, r *http.Request) {
 		Email: user.Email,
 		Token: jwt,
 		RefreshToken: refresh_token,
+		IsChirpyRed: user.IsChirpyRed,
 	}
 	data, err := json.Marshal(user_resource)
 	if err != nil {
@@ -498,7 +504,6 @@ func (cfg *apiConfig) HandlerRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(200)
 	w.Write(data)
-
 }
 
 func (cfg *apiConfig) HandlerRevoke(w http.ResponseWriter, r *http.Request) {
@@ -519,6 +524,43 @@ func (cfg *apiConfig) HandlerRevoke(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		err_params.Error = "Refresh Token Not Found"
 		handleErrors(w, &err_params, 401)
+		return
+	}
+	w.WriteHeader(204)
+}
+
+func (cfg *apiConfig) HandlerUpgrade(w http.ResponseWriter, r *http.Request) {
+	apikey, err := auth.GetAPIKey(r.Header)
+	if err != nil {
+		w.WriteHeader(401)
+	}
+	if apikey != cfg.ApiKey {
+		w.WriteHeader(401)
+	}
+	type Upgrade struct {
+		Event string `json:"event"`
+		Data struct {
+			User_id uuid.UUID `json:"user_id"`
+		} `json:"data"`
+	}
+	upgrade_config := Upgrade{}
+	decoder := json.NewDecoder(r.Body)
+	err_params := error_parameters{}
+	err = decoder.Decode(&upgrade_config)
+	if err != nil {
+		err_params.Error = "Something went wrong"
+		handleErrors(w, &err_params, 400)
+		return
+	}
+	if upgrade_config.Event != "user.upgraded" {
+		w.WriteHeader(204)
+		return
+	}
+	ctx := context.Background()
+	err = cfg.database.UpgradeUser(ctx, upgrade_config.Data.User_id)
+	if err != nil {
+		err_params.Error = "Something went wrong"
+		handleErrors(w, &err_params, 404)
 		return
 	}
 	w.WriteHeader(204)
@@ -553,6 +595,7 @@ func main() {
 	dbURL := os.Getenv("DB_URL")
 	platform := os.Getenv("PLATFORM")
 	JWT_secret_token := os.Getenv("JWT_SECRET")
+	apikey := os.Getenv("POLKA_KEY")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		fmt.Print(err)
@@ -567,6 +610,7 @@ func main() {
 	apiCfg.database = database.New(db)
 	apiCfg.platform = platform
 	apiCfg.JWT_secret = JWT_secret_token
+	apiCfg.ApiKey = apikey
 	fs := http.FileServer(http.Dir("."))
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/", fs)))
 	mux.HandleFunc("GET /admin/metrics", apiCfg.HitsHandler)
@@ -574,6 +618,7 @@ func main() {
 	mux.HandleFunc("PUT /api/users", apiCfg.UpdateUser)
 	mux.HandleFunc("POST /api/login", apiCfg.HandlerLogin)
 	mux.HandleFunc("POST /api/refresh", apiCfg.HandlerRefresh)
+	mux.HandleFunc("POST /api/polka/webhooks", apiCfg.HandlerUpgrade)
 	mux.HandleFunc("POST /api/revoke", apiCfg.HandlerRevoke)
 	mux.HandleFunc("GET /api/healthz", HealthzHandler)
 	mux.HandleFunc("GET /api/chirps", apiCfg.HandlerGetChirps)
