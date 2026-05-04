@@ -8,9 +8,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
+
 	"github.com/abolcerek/HTTPserver/internal/auth"
 	"github.com/abolcerek/HTTPserver/internal/database"
 	"github.com/google/uuid"
@@ -343,33 +345,54 @@ func (cfg *apiConfig) HandlerChirp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) HandlerGetChirps(w http.ResponseWriter, r *http.Request) {
-	ctx := context.Background()
-	chirps, err := cfg.database.GetChirps(ctx)
-	err_params := error_parameters{}
-	if err != nil {
-		err_params.Error = "Something went wrong"
-		handleErrors(w, &err_params, 400)
-		return
+    ctx := context.Background()
+    err_params := error_parameters{}
+    s := r.URL.Query().Get("author_id")
+	sort_type := r.URL.Query().Get("sort")
+    var chirps []database.Chirp 
+    var err error
+
+    if len(s) > 0 {
+        author_id, parseErr := uuid.Parse(s)
+        if parseErr != nil {
+            err_params.Error = "Something went wrong"
+            handleErrors(w, &err_params, 400)
+            return
+        }
+        chirps, err = cfg.database.GetChirpsByAuthor(ctx, author_id)
+    } else {
+        chirps, err = cfg.database.GetChirps(ctx)
+    }
+
+    if err != nil {
+        err_params.Error = "Something went wrong"
+        handleErrors(w, &err_params, 400)
+        return
+    }
+
+    chirps_response := []Chirp{}
+    for i := range chirps {
+        chirps_response = append(chirps_response, Chirp{
+            ID:        chirps[i].ID,
+            CreatedAt: chirps[i].CreatedAt,
+            UpdatedAt: chirps[i].UpdatedAt,
+            Body:      chirps[i].Body,
+            UserID:    chirps[i].UserID,
+        })
+    }
+	if sort_type == "desc" {
+		sort.Slice(chirps_response, func(i, j int) bool {
+			return chirps_response[i].CreatedAt.After(chirps_response[j].CreatedAt)
+		})
 	}
-	chirps_response := []Chirp{}
-	for i := range chirps {
-		chirp_response := Chirp{
-			ID: chirps[i].ID,
-			CreatedAt: chirps[i].CreatedAt,
-			UpdatedAt: chirps[i].UpdatedAt,
-			Body: chirps[i].Body,
-			UserID: chirps[i].UserID,
-		}
-		chirps_response = append(chirps_response, chirp_response)
-	}
-	data, err := json.Marshal(chirps_response)
-	if err != nil {
-		log.Printf("Error marshalling JSON")
-		return
-	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(200)
-	w.Write(data)
+    data, err := json.Marshal(chirps_response)
+    if err != nil {
+        log.Printf("Error marshalling JSON")
+        return
+    }
+    w.Header().Set("Content-Type", "application/json; charset=utf-8")
+    w.WriteHeader(200)
+    w.Write(data)
 }
 
 func (cfg *apiConfig) HandlerGetChirp(w http.ResponseWriter, r *http.Request) {
